@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kalshi Orderbook Viewer</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/modern-css-reset/dist/reset.min.css" />
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    header { margin-bottom: 20px; }
+    input { padding: 4px 8px; font-size: 1rem; }
+    button { padding: 4px 10px; font-size: 1rem; margin-left: 6px; }
+    #headline { margin-top: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <header>
+    <form id="ticker-form">
+      <label>Market ticker:
+        <input id="ticker-input" type="text" value="KXHIGHNY-25AUG06-B81.5" size="35" />
+      </label>
+      <button type="submit">Load</button>
+    </form>
+    <div id="headline"></div>
+  </header>
+  <div id="root"></div>
+
+  <!-- React & friends -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const {
+      BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine
+    } = Recharts;
+
+    const API_TEMPLATE = "https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook";
+
+    function App({ ticker, topN = 15, refreshMs = 1000 }) {
+      const [data, setData] = useState([]);
+      const [headline, setHeadline] = useState("");
+
+      useEffect(() => {
+        const headEl = document.getElementById('headline');
+        headEl.textContent = ticker + ' | loading...';
+
+        function normLevels(levels) {
+          return (levels || []).map(l => ({ price: +l[0], qty: +l[1] }))
+                                .sort((a, b) => a.price - b.price);
+        }
+
+        function fetchData() {
+          fetch(API_TEMPLATE.replace('{ticker}', ticker))
+            .then(r => r.json())
+            .then(json => {
+              const yesLevels = normLevels(json.orderbook?.yes);
+              const noLevels = normLevels(json.orderbook?.no);
+
+              const bestYesBid = yesLevels.length ? Math.max(...yesLevels.map(l => l.price)) : null;
+              const bestNoBid = noLevels.length ? Math.max(...noLevels.map(l => l.price)) : null;
+              const bestYesAsk = bestNoBid !== null ? 100 - bestNoBid : null;
+              const bestNoAsk = bestYesBid !== null ? 100 - bestYesBid : null;
+              const spread = (bestYesBid !== null && bestYesAsk !== null) ? bestYesAsk - bestYesBid : null;
+
+              const yesTop = yesLevels.slice(-topN);
+              const noTop = noLevels.slice(-topN);
+
+              const yMap = {};
+              yesTop.forEach(({price, qty}) => { yMap[price] = (yMap[price] || 0) + qty; });
+              const nMap = {};
+              noTop.forEach(({price, qty}) => { const mp = 100 - price; nMap[mp] = (nMap[mp] || 0) + qty; });
+
+              const keys = Array.from(new Set([...Object.keys(yMap), ...Object.keys(nMap)])).map(Number).sort((a,b)=>a-b);
+              const rows = keys.map(k => ({ price: k, yesQty: yMap[k] || 0, noQty: nMap[k] || 0 }));
+              setData(rows);
+
+              const hl = `YES ${bestYesBid ?? '-'}–${bestYesAsk ?? '-'} | NO ${bestNoBid ?? '-'}–${bestNoAsk ?? '-'} | Spread: ${spread ?? '-'}`;
+              setHeadline(hl);
+              headEl.textContent = hl;
+            })
+            .catch(err => {
+              const msg = `Error: ${err}`;
+              setHeadline(msg);
+              headEl.textContent = msg;
+            });
+        }
+
+        fetchData();
+        const id = setInterval(fetchData, refreshMs);
+        return () => clearInterval(id);
+      }, [ticker, topN, refreshMs]);
+
+      function handleClick(side, price) {
+        alert(`Mock order: ${side} @ ${price}¢`);
+      }
+
+      const bestYesBid = data.reduce((max, d) => d.yesQty > 0 && d.price > max ? d.price : max, null);
+      const bestYesAsk = data.reduce((min, d) => d.noQty > 0 && d.price < (min ?? 1000) ? d.price : min, null);
+
+      return (
+        <BarChart width={900} height={400} data={data} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="price" type="number" domain={[0, 100]} ticks={[0,10,20,30,40,50,60,70,80,90,100]} label={{ value: 'YES price (¢) — NO mapped via (100−NO)', position: 'insideBottom', offset: -10 }} />
+          <YAxis />
+          <Tooltip formatter={(value, name) => [value, name === 'yesQty' ? 'YES bids' : 'NO as YES asks']} />
+          <Legend formatter={(val) => val === 'yesQty' ? 'YES bids' : 'NO as YES asks'} />
+          <Bar dataKey="yesQty" fill="#4caf50" onClick={(data) => handleClick('YES', data.price)} />
+          <Bar dataKey="noQty" fill="#f44336" onClick={(data) => handleClick('NO', 100 - data.price)} opacity={0.7} />
+          {bestYesBid !== null && <ReferenceLine x={bestYesBid} stroke="#4caf50" strokeDasharray="3 3" label={`BYB ${bestYesBid}`} />}
+          {bestYesAsk !== null && <ReferenceLine x={bestYesAsk} stroke="#f44336" strokeDasharray="3 3" label={`BYA ${bestYesAsk}`} />}
+        </BarChart>
+      );
+    }
+
+    function mountApp(ticker) {
+      ReactDOM.render(<App ticker={ticker} />, document.getElementById('root'));
+    }
+
+    const form = document.getElementById('ticker-form');
+    const input = document.getElementById('ticker-input');
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      mountApp(input.value.trim());
+    });
+
+    // initial mount
+    mountApp(document.getElementById('ticker-input').value);
+  </script>
+</body>
+</html>
